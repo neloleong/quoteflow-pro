@@ -1,0 +1,58 @@
+@font-face {
+  font-family: "EMITReportBody";
+  src: url("/fonts/emit-report-body.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "EMITReportBody";
+  src: url("/fonts/emit-report-body-bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "EMITReportTitle";
+  src: url("/fonts/emit-report-title.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+.emit-report-font {
+  font-family: "EMITReportBody", "Microsoft YaHei", "PingFang TC", "Arial", sans-serif;
+}
+
+.emit-report-title-font {
+  font-family: "EMITReportTitle", "EMITReportBody", "Microsoft YaHei", "PingFang TC", serif;
+}
+
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
