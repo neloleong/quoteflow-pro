@@ -1,28 +1,27 @@
 import { createBrowserClient } from "@supabase/ssr";
 
+function getSupabasePublicKey() {
+  return (
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  );
+}
+
 export function createClient() {
-
-  
-
-
   const supabaseUrl =
     process.env.NEXT_PUBLIC_SUPABASE_URL;
 
-  const supabaseAnonKey =
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
+  const supabasePublicKey = getSupabasePublicKey();
 
   console.log(
     "SUPABASE URL FROM CLIENT:",
     supabaseUrl
   );
 
-
   console.log(
     "SUPABASE KEY EXISTS:",
-    !!supabaseAnonKey
+    !!supabasePublicKey
   );
-
 
   if (!supabaseUrl) {
     throw new Error(
@@ -30,21 +29,16 @@ export function createClient() {
     );
   }
 
-
-  if (!supabaseAnonKey) {
+  if (!supabasePublicKey) {
     throw new Error(
-      "Missing NEXT_PUBLIC_SUPABASE_ANON_KEY"
+      "Missing NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY"
     );
   }
 
-
-  console.log(
-    
-  );
-
+  console.log();
 
   return createBrowserClient(
     supabaseUrl,
-    supabaseAnonKey
+    supabasePublicKey
   );
 }
