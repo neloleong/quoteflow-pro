@@ -19,6 +19,15 @@ type Quotation = {
   created_at: string | null;
 };
 
+type ErrorDetail = {
+  name?: string;
+  message?: string;
+  code?: string;
+  details?: string;
+  hint?: string;
+  stack?: string;
+};
+
 function formatDateText(dateValue: string | null) {
   if (!dateValue) {
     return "-";
@@ -53,36 +62,69 @@ function formatCreatedAt(createdAt: string | null) {
   return `${year} / ${month} / ${day} ${hour}:${minute}`;
 }
 
-function getErrorMessage(error: unknown, fallbackMessage: string) {
+function getErrorDetail(error: unknown): ErrorDetail {
   if (error instanceof Error) {
-    return error.message || fallbackMessage;
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    };
   }
 
   if (typeof error === "object" && error !== null) {
-    const errorObject = error as {
-      code?: string;
-      message?: string;
-      details?: string;
-      hint?: string;
+    const errorObject = error as ErrorDetail;
+
+    return {
+      name: errorObject.name,
+      message: errorObject.message,
+      code: errorObject.code,
+      details: errorObject.details,
+      hint: errorObject.hint,
+      stack: errorObject.stack,
     };
+  }
 
-    if (errorObject.message) {
-      return errorObject.message;
-    }
+  return {
+    message: String(error || ""),
+  };
+}
 
-    if (errorObject.details) {
-      return errorObject.details;
-    }
+function getErrorMessage(error: unknown, fallbackMessage: string) {
+  const errorDetail = getErrorDetail(error);
 
-    if (errorObject.hint) {
-      return errorObject.hint;
-    }
+  const message = errorDetail.message || "";
+  const lowerMessage = message.toLowerCase();
 
-    if (errorObject.code) {
-      return `Database error code: ${errorObject.code}`;
-    }
+  if (
+    lowerMessage.includes("networkerror") ||
+    lowerMessage.includes("failed to fetch") ||
+    lowerMessage.includes("fetch resource")
+  ) {
+    return [
+      "無法連接 Supabase，所以暫時讀不到 Quotation 記錄。",
+      "請先確認 .env.local 的 NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY 是否正確，並用 http://localhost:3000 開啟。",
+      "如果仍然失敗，請檢查 VPN、防火牆、瀏覽器插件或網絡是否阻止 Supabase。",
+    ].join(" ");
+  }
 
-    const jsonText = JSON.stringify(errorObject);
+  if (errorDetail.message) {
+    return errorDetail.message;
+  }
+
+  if (errorDetail.details) {
+    return errorDetail.details;
+  }
+
+  if (errorDetail.hint) {
+    return errorDetail.hint;
+  }
+
+  if (errorDetail.code) {
+    return `Database error code: ${errorDetail.code}`;
+  }
+
+  if (typeof error === "object" && error !== null) {
+    const jsonText = JSON.stringify(error);
 
     if (jsonText && jsonText !== "{}") {
       return jsonText;
@@ -90,6 +132,32 @@ function getErrorMessage(error: unknown, fallbackMessage: string) {
   }
 
   return fallbackMessage;
+}
+
+function buildDebugMessage(error: unknown) {
+  const errorDetail = getErrorDetail(error);
+
+  const debugInfo = {
+    error: {
+      name: errorDetail.name || "",
+      message: errorDetail.message || "",
+      code: errorDetail.code || "",
+      details: errorDetail.details || "",
+      hint: errorDetail.hint || "",
+      stack: errorDetail.stack || "",
+    },
+    environment: {
+      supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+      hasSupabaseUrl: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
+      hasSupabaseAnonKey: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+      browserOnline:
+        typeof navigator !== "undefined" ? navigator.onLine : "unknown",
+      currentUrl:
+        typeof window !== "undefined" ? window.location.href : "unknown",
+    },
+  };
+
+  return JSON.stringify(debugInfo, null, 2);
 }
 
 export default function QuotationsListPage() {
@@ -109,6 +177,7 @@ export default function QuotationsListPage() {
 
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [debugMessage, setDebugMessage] = useState("");
 
   useEffect(() => {
     setHasMounted(true);
@@ -128,6 +197,7 @@ export default function QuotationsListPage() {
       setLoading(true);
       setErrorMessage("");
       setSuccessMessage("");
+      setDebugMessage("");
 
       const { data, error } = await supabase
         .from("quotations")
@@ -142,9 +212,13 @@ export default function QuotationsListPage() {
       }
 
       setQuotations((data ?? []) as Quotation[]);
-    } catch (error) {
-      console.error("Load quotations error:", error);
+    } catch (error: unknown) {
+      const debugText = buildDebugMessage(error);
+
+      console.error("Load quotations error detail:", debugText);
+
       setErrorMessage(getErrorMessage(error, "Failed to load quotations."));
+      setDebugMessage(debugText);
     } finally {
       setLoading(false);
     }
@@ -165,6 +239,7 @@ export default function QuotationsListPage() {
       setDeletingQuotationId(quotation.id);
       setErrorMessage("");
       setSuccessMessage("");
+      setDebugMessage("");
 
       const deletedAt = new Date().toISOString();
 
@@ -201,9 +276,13 @@ export default function QuotationsListPage() {
       );
 
       setSuccessMessage(`Quotation deleted: ${quotationLabel}`);
-    } catch (error) {
-      console.error("Delete quotation error:", error);
+    } catch (error: unknown) {
+      const debugText = buildDebugMessage(error);
+
+      console.error("Delete quotation error detail:", debugText);
+
       setErrorMessage(getErrorMessage(error, "Failed to delete quotation."));
+      setDebugMessage(debugText);
     } finally {
       setDeletingQuotationId(null);
     }
@@ -310,7 +389,19 @@ export default function QuotationsListPage() {
 
         {errorMessage && (
           <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-5 text-sm text-red-700">
-            {errorMessage}
+            <p className="font-semibold">Failed to load quotation records</p>
+            <p className="mt-2 whitespace-pre-line">{errorMessage}</p>
+
+            {debugMessage && (
+              <details className="mt-4 rounded-xl border border-red-200 bg-white p-4 text-xs text-slate-700">
+                <summary className="cursor-pointer font-semibold text-red-700">
+                  Show technical debug information
+                </summary>
+                <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words">
+                  {debugMessage}
+                </pre>
+              </details>
+            )}
           </div>
         )}
 

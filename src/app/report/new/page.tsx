@@ -44,6 +44,7 @@ type ReportItemInput = {
   item_name: string;
   test_method: string;
   result_value: string;
+  result_exponent: string;
   unit: string;
 };
 
@@ -52,6 +53,7 @@ type ReportItemEditableField =
   | "item_name"
   | "test_method"
   | "result_value"
+  | "result_exponent"
   | "unit";
 
 function getTodayDateText() {
@@ -172,6 +174,7 @@ function dedupeReportItemsByTestItem<T extends ReportItemInput>(
       item_name: existingItem.item_name || item.item_name,
       test_method: existingItem.test_method || item.test_method,
       result_value: existingItem.result_value || item.result_value,
+      result_exponent: existingItem.result_exponent || item.result_exponent,
       unit: existingItem.unit || item.unit,
     });
   });
@@ -214,6 +217,7 @@ function dedupeReportItemsBySampleAndTest<T extends ReportItemInput>(
       item_name: existingItem.item_name || item.item_name,
       test_method: existingItem.test_method || item.test_method,
       result_value: existingItem.result_value || item.result_value,
+      result_exponent: existingItem.result_exponent || item.result_exponent,
       unit: existingItem.unit || item.unit,
     });
   });
@@ -414,6 +418,7 @@ function mapTestItemRecord(record: AnyRecord): TestItemInfo | null {
       "檢測項目",
       "檢測名稱",
       "項目名稱",
+      "item_name_zh",
     ]),
     standard: pickString(record, [
       "standard",
@@ -563,7 +568,9 @@ export default function NewReportPage() {
   const [quotations, setQuotations] = useState<QuotationOption[]>([]);
   const [selectedQuotationId, setSelectedQuotationId] = useState("");
   const [selectedQuotationNo, setSelectedQuotationNo] = useState("");
-  const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(
+    null
+  );
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
     null
   );
@@ -594,6 +601,7 @@ export default function NewReportPage() {
       item_name: "",
       test_method: "",
       result_value: "",
+      result_exponent: "",
       unit: "",
     },
   ]);
@@ -1019,6 +1027,7 @@ export default function NewReportPage() {
             item_name: itemName,
             test_method: testMethod,
             result_value: "",
+            result_exponent: "",
             unit,
           };
         })
@@ -1044,6 +1053,7 @@ export default function NewReportPage() {
             item_name: "",
             test_method: "",
             result_value: "",
+            result_exponent: "",
             unit: "",
           },
         ]);
@@ -1087,6 +1097,7 @@ export default function NewReportPage() {
         item_name: "",
         test_method: "",
         result_value: "",
+        result_exponent: "",
         unit: "",
       },
     ]);
@@ -1142,6 +1153,7 @@ export default function NewReportPage() {
           item_name: item.item_name.trim(),
           test_method: item.test_method.trim(),
           result_value: item.result_value.trim(),
+          result_exponent: item.result_exponent.trim(),
           unit: item.unit.trim(),
         }))
         .filter(
@@ -1149,6 +1161,7 @@ export default function NewReportPage() {
             item.item_name ||
             item.test_method ||
             item.result_value ||
+            item.result_exponent ||
             item.unit
         );
 
@@ -1276,6 +1289,7 @@ export default function NewReportPage() {
           item_name: item.item_name || null,
           test_method: item.test_method || null,
           result_value: item.result_value || null,
+          result_exponent: item.result_exponent || null,
           unit: item.unit || null,
           sort_order: index + 1,
         }));
@@ -1548,8 +1562,9 @@ export default function NewReportPage() {
                               <p className="font-bold">{group.groupName}</p>
                               <p className="mt-1">
                                 檢測項目：
-                                {getUniqueReportItemNameText(group.groupItems) ||
-                                  "-"}
+                                {getUniqueReportItemNameText(
+                                  group.groupItems
+                                ) || "-"}
                               </p>
                             </div>
                           ))}
@@ -1660,7 +1675,7 @@ export default function NewReportPage() {
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[1050px] border-collapse text-sm">
+                <table className="w-full min-w-[1180px] border-collapse text-sm">
                   <thead className="bg-slate-100">
                     <tr>
                       <th className="w-[60px] border border-slate-200 px-3 py-3 text-center font-semibold text-slate-700">
@@ -1677,6 +1692,9 @@ export default function NewReportPage() {
                       </th>
                       <th className="border border-slate-200 px-3 py-3 text-left font-semibold text-slate-700">
                         結果數據
+                      </th>
+                      <th className="border border-slate-200 px-3 py-3 text-left font-semibold text-slate-700">
+                        次方數
                       </th>
                       <th className="border border-slate-200 px-3 py-3 text-left font-semibold text-slate-700">
                         單位
@@ -1748,7 +1766,22 @@ export default function NewReportPage() {
                                 event.target.value
                               )
                             }
-                            placeholder="例如：＜ 10 / 未檢出"
+                            placeholder="例如：2.6 / ＜ 10 / 未檢出"
+                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900"
+                          />
+                        </td>
+
+                        <td className="border border-slate-200 px-3 py-3">
+                          <input
+                            value={item.result_exponent}
+                            onChange={(event) =>
+                              updateItem(
+                                index,
+                                "result_exponent",
+                                event.target.value
+                              )
+                            }
+                            placeholder="例如：2 / 10² / 10^2"
                             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900"
                           />
                         </td>
@@ -1840,16 +1873,12 @@ export default function NewReportPage() {
                 </p>
 
                 <p>
-                  <span className="font-semibold text-slate-900">
-                    食品廠:
-                  </span>{" "}
+                  <span className="font-semibold text-slate-900">食品廠:</span>{" "}
                   {customerName || "-"}
                 </p>
 
                 <p>
-                  <span className="font-semibold text-slate-900">
-                    新增日期:
-                  </span>{" "}
+                  <span className="font-semibold text-slate-900">新增日期:</span>{" "}
                   {formatCreatedDateText(selectedQuotationCreatedAt)}
                 </p>
 
@@ -1861,16 +1890,12 @@ export default function NewReportPage() {
                 </p>
 
                 <p>
-                  <span className="font-semibold text-slate-900">
-                    Reports:
-                  </span>{" "}
+                  <span className="font-semibold text-slate-900">Reports:</span>{" "}
                   {sampleReportsPreview.length || "-"}
                 </p>
 
                 <p>
-                  <span className="font-semibold text-slate-900">
-                    Sample:
-                  </span>{" "}
+                  <span className="font-semibold text-slate-900">Sample:</span>{" "}
                   {sampleReportsPreview.length > 0
                     ? sampleReportsPreview.join("、")
                     : sampleName || "-"}
@@ -1891,9 +1916,7 @@ export default function NewReportPage() {
                 </p>
 
                 <p>
-                  <span className="font-semibold text-slate-900">
-                    Status:
-                  </span>{" "}
+                  <span className="font-semibold text-slate-900">Status:</span>{" "}
                   {status}
                 </p>
               </div>

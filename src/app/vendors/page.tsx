@@ -18,6 +18,7 @@ type Vendor = {
   accreditation: string | null;
   remarks: string | null;
   is_active: boolean;
+  deleted_at: string | null;
 };
 
 type VendorForm = {
@@ -43,6 +44,8 @@ const defaultForm: VendorForm = {
 };
 
 export default function VendorsPage() {
+  
+  console.log("VENDORS PAGE MOUNT");
   const supabase = createClient();
 
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -57,36 +60,65 @@ export default function VendorsPage() {
   const [successMessage, setSuccessMessage] = useState("");
 
   useEffect(() => {
-    loadVendors();
+  
+
+  loadVendors();
   }, []);
 
   async function loadVendors() {
-    try {
-      setLoading(true);
-      setErrorMessage("");
+  try {
 
-      const { data, error } = await supabase
-        .from("vendors")
-        .select(
-          "id,company_id,vendor_name,contact_person,phone,fax,email,address,accreditation,remarks,is_active"
-        )
-        .eq("company_id", EMIT_COMPANY_ID)
-        .is("deleted_at", null)
-        .order("vendor_name", { ascending: true });
+    
 
-      if (error) {
-        throw error;
-      }
 
-      setVendors(data ?? []);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to load vendors.";
-      setErrorMessage(message);
-    } finally {
-      setLoading(false);
+    const result = await supabase
+      .from("vendors")
+      .select("*");
+
+
+    const { data, error } = await supabase
+  .from("vendors")
+  .select(
+    "id,company_id,vendor_name,contact_person,phone,fax,email,address,accreditation,remarks,is_active,deleted_at"
+  )
+  .eq(
+    "company_id",
+    EMIT_COMPANY_ID
+  )
+  .is(
+    "deleted_at",
+    null
+  )
+  .order(
+    "vendor_name",
+    {
+      ascending: true,
     }
+  );
+
+if (error) {
+  throw error;
+}
+
+setVendors(data ?? []);
+
+
+    setVendors(result.data ?? []);
+
+
+  } catch(error) {
+
+    console.error(
+      
+      error
+    );
+
+  } finally {
+
+    setLoading(false);
+
   }
+}
 
   const filteredVendors = useMemo(() => {
     const lowerKeyword = keyword.trim().toLowerCase();

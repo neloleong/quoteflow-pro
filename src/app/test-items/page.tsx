@@ -30,6 +30,7 @@ type TestItem = {
   major_category: string | null;
   testing_object: string | null;
   test_standard: string | null;
+  unit: string | null;
   lab_price_rmb: number;
   customer_price_mop: number;
   currency_lab: string;
@@ -61,6 +62,9 @@ type TestItemGroupItem = {
   test_item_id: string;
   sort_order: number;
   display_name_override: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  deleted_at?: string | null;
 };
 
 type FormState = {
@@ -72,6 +76,7 @@ type FormState = {
   majorCategory: string;
   testingObject: string;
   testStandard: string;
+  unit: string;
   labPriceRmb: string;
   customerPriceMop: string;
   turnaroundText: string;
@@ -108,6 +113,7 @@ const defaultForm: FormState = {
   majorCategory: "食品",
   testingObject: "食品",
   testStandard: "",
+  unit: "item",
   labPriceRmb: "0",
   customerPriceMop: "",
   turnaroundText: "約 7 個工作天",
@@ -251,6 +257,8 @@ function getErrorMessage(error: unknown, fallbackMessage: string) {
 export default function TestItemsPage() {
   const supabase = useMemo(() => createClient(), []);
 
+  const [hasMounted, setHasMounted] = useState(false);
+
   const [items, setItems] = useState<TestItem[]>([]);
   const [categories, setCategories] = useState<TestCategory[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -284,9 +292,17 @@ export default function TestItemsPage() {
   const [successMessage, setSuccessMessage] = useState("");
 
   useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hasMounted) {
+      return;
+    }
+
     loadInitialData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [hasMounted]);
 
   const activeCompanyId = useMemo(() => {
     return (
@@ -381,7 +397,8 @@ export default function TestItemsPage() {
         item.item_name_en?.toLowerCase().includes(lowerKeyword) ||
         item.major_category?.toLowerCase().includes(lowerKeyword) ||
         item.testing_object?.toLowerCase().includes(lowerKeyword) ||
-        item.test_standard?.toLowerCase().includes(lowerKeyword)
+        item.test_standard?.toLowerCase().includes(lowerKeyword) ||
+        item.unit?.toLowerCase().includes(lowerKeyword)
       );
     });
   }, [items, keyword]);
@@ -401,7 +418,8 @@ export default function TestItemsPage() {
         item.item_name_en?.toLowerCase().includes(lowerKeyword) ||
         item.major_category?.toLowerCase().includes(lowerKeyword) ||
         item.testing_object?.toLowerCase().includes(lowerKeyword) ||
-        item.test_standard?.toLowerCase().includes(lowerKeyword)
+        item.test_standard?.toLowerCase().includes(lowerKeyword) ||
+        item.unit?.toLowerCase().includes(lowerKeyword)
       );
     });
   }, [items, groupItemKeyword]);
@@ -461,7 +479,7 @@ export default function TestItemsPage() {
         supabase
           .from("test_items")
           .select(
-            "id,company_id,category_id,vendor_id,item_code,item_name_zh,item_name_en,major_category,testing_object,test_standard,lab_price_rmb,customer_price_mop,currency_lab,currency_customer,turnaround_text,is_accredited,show_in_quotation,is_active"
+            "id,company_id,category_id,vendor_id,item_code,item_name_zh,item_name_en,major_category,testing_object,test_standard,unit,lab_price_rmb,customer_price_mop,currency_lab,currency_customer,turnaround_text,is_accredited,show_in_quotation,is_active"
           )
           .is("deleted_at", null)
           .order("item_code", { ascending: true }),
@@ -738,6 +756,7 @@ export default function TestItemsPage() {
         major_category: form.majorCategory.trim() || null,
         testing_object: form.testingObject.trim() || null,
         test_standard: form.testStandard.trim() || null,
+        unit: form.unit.trim() || "item",
         lab_price_rmb: Number(form.labPriceRmb),
         customer_price_mop: Number(form.customerPriceMop),
         currency_lab: "RMB",
@@ -795,21 +814,22 @@ export default function TestItemsPage() {
       setErrorMessage("");
       setSuccessMessage("");
 
+      const nowText = new Date().toISOString();
       const cleanGroupCode = groupForm.groupCode.trim();
+      let targetCompanyId = editingGroupCompanyId || activeCompanyId;
+
       const groupPayload = {
-        company_id: editingGroupCompanyId || activeCompanyId,
+        company_id: targetCompanyId,
         group_code: cleanGroupCode,
         group_name_zh: groupForm.groupNameZh.trim(),
         group_name_en: groupForm.groupNameEn.trim() || null,
         description: groupForm.description.trim() || null,
-        customer_group_price_mop: Number(
-          groupForm.customerGroupPriceMop || 0
-        ),
+        customer_group_price_mop: Number(groupForm.customerGroupPriceMop || 0),
         lab_group_price_rmb: Number(groupForm.labGroupPriceRmb || 0),
         price_mode: groupForm.priceMode || "sum_items",
         sort_order: Number(groupForm.sortOrder || 0),
         is_active: groupForm.isActive,
-        updated_at: new Date().toISOString(),
+        updated_at: nowText,
       };
 
       let targetGroupId = editingGroupId;
@@ -821,73 +841,237 @@ export default function TestItemsPage() {
           .eq("id", editingGroupId);
 
         if (updateGroupError) {
+          console.error(
+            "Update test item group error:",
+            JSON.stringify(updateGroupError, null, 2)
+          );
           throw updateGroupError;
         }
       } else {
-        const { data: createdGroup, error: createGroupError } = await supabase
-          .from("test_item_groups")
-          .insert({
-            ...groupPayload,
-            created_at: new Date().toISOString(),
-          })
-          .select("id")
-          .single();
+        const { data: existingGroup, error: existingGroupError } =
+          await supabase
+            .from("test_item_groups")
+            .select("id,company_id")
+            .eq("group_code", cleanGroupCode)
+            .is("deleted_at", null)
+            .maybeSingle();
 
-        if (createGroupError) {
-          throw createGroupError;
+        if (existingGroupError) {
+          console.error(
+            "Find existing test item group error:",
+            JSON.stringify(existingGroupError, null, 2)
+          );
+          throw existingGroupError;
         }
 
-        targetGroupId = createdGroup.id as string;
+        if (existingGroup?.id) {
+          targetGroupId = existingGroup.id as string;
+          targetCompanyId =
+            (existingGroup.company_id as string | null) || targetCompanyId;
+
+          const { error: updateExistingGroupError } = await supabase
+            .from("test_item_groups")
+            .update({
+              ...groupPayload,
+              company_id: targetCompanyId,
+            })
+            .eq("id", targetGroupId);
+
+          if (updateExistingGroupError) {
+            console.error(
+              "Update existing test item group by code error:",
+              JSON.stringify(updateExistingGroupError, null, 2)
+            );
+            throw updateExistingGroupError;
+          }
+        } else {
+          const { data: createdGroup, error: createGroupError } =
+            await supabase
+              .from("test_item_groups")
+              .insert({
+                ...groupPayload,
+                created_at: nowText,
+              })
+              .select("id")
+              .single();
+
+          if (createGroupError) {
+            console.error(
+              "Create test item group error:",
+              JSON.stringify(createGroupError, null, 2)
+            );
+            throw createGroupError;
+          }
+
+          targetGroupId = createdGroup?.id as string;
+        }
       }
 
       if (!targetGroupId) {
         throw new Error("Missing group id after save.");
       }
 
-      const nowText = new Date().toISOString();
-
-      const { error: softDeleteError } = await supabase
-        .from("test_item_group_items")
-        .update({
-          deleted_at: nowText,
-          updated_at: nowText,
+      const normalizedDraftGroupItems = draftGroupItems.map(
+        (draftItem, index) => ({
+          localId: draftItem.localId,
+          testItemId: draftItem.testItemId,
+          sortOrder:
+            Number.isNaN(Number(draftItem.sortOrder)) ||
+            Number(draftItem.sortOrder) < 0
+              ? (index + 1) * 10
+              : Number(draftItem.sortOrder),
+          displayNameOverride: draftItem.displayNameOverride.trim() || null,
         })
-        .eq("group_id", targetGroupId)
-        .is("deleted_at", null);
+      );
 
-      if (softDeleteError) {
-        throw softDeleteError;
+      const draftTestItemIdSet = new Set(
+        normalizedDraftGroupItems.map((draftItem) => draftItem.testItemId)
+      );
+
+      const { data: existingGroupItemsData, error: existingGroupItemsError } =
+        await supabase
+          .from("test_item_group_items")
+          .select(
+            "id,company_id,group_id,test_item_id,sort_order,display_name_override,deleted_at"
+          )
+          .eq("group_id", targetGroupId);
+
+      if (existingGroupItemsError) {
+        console.error(
+          "Load existing group items before save error:",
+          JSON.stringify(existingGroupItemsError, null, 2)
+        );
+        throw existingGroupItemsError;
       }
 
-      const groupItemPayload = draftGroupItems.map((draftItem, index) => ({
-        company_id: editingGroupCompanyId || activeCompanyId,
-        group_id: targetGroupId,
-        test_item_id: draftItem.testItemId,
-        sort_order:
-          Number.isNaN(Number(draftItem.sortOrder)) ||
-          Number(draftItem.sortOrder) < 0
-            ? (index + 1) * 10
-            : Number(draftItem.sortOrder),
-        display_name_override:
-          draftItem.displayNameOverride.trim() || null,
-      }));
+      const existingGroupItems =
+        (existingGroupItemsData ?? []) as TestItemGroupItem[];
 
-      const { error: insertGroupItemsError } = await supabase
-        .from("test_item_group_items")
-        .insert(groupItemPayload);
+      const existingItemsByTestItemId = new Map<string, TestItemGroupItem[]>();
 
-      if (insertGroupItemsError) {
-        throw insertGroupItemsError;
+      existingGroupItems.forEach((existingItem) => {
+        const currentItems =
+          existingItemsByTestItemId.get(existingItem.test_item_id) || [];
+
+        currentItems.push(existingItem);
+        existingItemsByTestItemId.set(existingItem.test_item_id, currentItems);
+      });
+
+      const itemsToSoftDelete = existingGroupItems.filter(
+        (existingItem) => !draftTestItemIdSet.has(existingItem.test_item_id)
+      );
+
+      if (itemsToSoftDelete.length > 0) {
+        const { error: softDeleteRemovedItemsError } = await supabase
+          .from("test_item_group_items")
+          .update({
+            deleted_at: nowText,
+            updated_at: nowText,
+          })
+          .in(
+            "id",
+            itemsToSoftDelete.map((item) => item.id)
+          );
+
+        if (softDeleteRemovedItemsError) {
+          console.error(
+            "Soft delete removed group items error:",
+            JSON.stringify(softDeleteRemovedItemsError, null, 2)
+          );
+          throw softDeleteRemovedItemsError;
+        }
+      }
+
+      for (const draftItem of normalizedDraftGroupItems) {
+        const existingItems =
+          existingItemsByTestItemId.get(draftItem.testItemId) || [];
+        const primaryExistingItem = existingItems[0];
+
+        if (primaryExistingItem) {
+          const duplicatedExistingItems = existingItems.slice(1);
+
+          if (duplicatedExistingItems.length > 0) {
+            const { error: softDeleteDuplicatedItemsError } = await supabase
+              .from("test_item_group_items")
+              .update({
+                deleted_at: nowText,
+                updated_at: nowText,
+              })
+              .in(
+                "id",
+                duplicatedExistingItems.map((item) => item.id)
+              );
+
+            if (softDeleteDuplicatedItemsError) {
+              console.error(
+                "Soft delete duplicated group items error:",
+                JSON.stringify(softDeleteDuplicatedItemsError, null, 2)
+              );
+              throw softDeleteDuplicatedItemsError;
+            }
+          }
+
+          const { error: updateGroupItemError } = await supabase
+            .from("test_item_group_items")
+            .update({
+              company_id: targetCompanyId,
+              group_id: targetGroupId,
+              test_item_id: draftItem.testItemId,
+              sort_order: draftItem.sortOrder,
+              display_name_override: draftItem.displayNameOverride,
+              deleted_at: null,
+              updated_at: nowText,
+            })
+            .eq("id", primaryExistingItem.id);
+
+          if (updateGroupItemError) {
+            console.error(
+              "Update group item error:",
+              JSON.stringify(updateGroupItemError, null, 2)
+            );
+            throw updateGroupItemError;
+          }
+        } else {
+          const { error: insertGroupItemError } = await supabase
+            .from("test_item_group_items")
+            .insert({
+              company_id: targetCompanyId,
+              group_id: targetGroupId,
+              test_item_id: draftItem.testItemId,
+              sort_order: draftItem.sortOrder,
+              display_name_override: draftItem.displayNameOverride,
+              created_at: nowText,
+              updated_at: nowText,
+              deleted_at: null,
+            });
+
+          if (insertGroupItemError) {
+            console.error(
+              "Insert group item error:",
+              JSON.stringify(insertGroupItemError, null, 2)
+            );
+            throw insertGroupItemError;
+          }
+        }
       }
 
       setSuccessMessage(
-        editingGroupId ? "檢測組已更新。" : "檢測組已新增。"
+        editingGroupId ? "檢測組已更新。" : "檢測組已儲存。"
       );
 
       resetGroupForm(false);
       await loadGroupData();
     } catch (error) {
-      console.error("Save test item group error:", error);
+      console.error("Save test item group error raw:", error);
+      console.error(
+        "Save test item group error json:",
+        JSON.stringify(error, null, 2)
+      );
+      console.error(
+        "Save test item group error keys:",
+        typeof error === "object" && error !== null ? Object.keys(error) : []
+      );
+
       setErrorMessage(getErrorMessage(error, "Failed to save test group."));
     } finally {
       setSavingGroup(false);
@@ -912,6 +1096,7 @@ export default function TestItemsPage() {
       majorCategory: item.major_category || "食品",
       testingObject: item.testing_object || "食品",
       testStandard: item.test_standard || "",
+      unit: item.unit || "item",
       labPriceRmb: String(item.lab_price_rmb),
       customerPriceMop: String(item.customer_price_mop),
       turnaroundText: item.turnaround_text || "約 7 個工作天",
@@ -1131,9 +1316,9 @@ export default function TestItemsPage() {
       groupNameEn: "Nutrition Label",
       description:
         "營養標籤檢測組：能量、碳水化合物、蛋白質、鈉、反式脂肪酸、飽和脂肪酸、總糖、脂肪、水分、灰分。",
-      customerGroupPriceMop: "0",
+      customerGroupPriceMop: "3900",
       labGroupPriceRmb: "0",
-      priceMode: "sum_items",
+      priceMode: "group_price",
       sortOrder: "10",
       isActive: true,
     });
@@ -1290,6 +1475,18 @@ export default function TestItemsPage() {
       console.error("Enable test item group error:", error);
       setErrorMessage(getErrorMessage(error, "Failed to enable group."));
     }
+  }
+
+  if (!hasMounted) {
+    return (
+      <AppShell>
+        <div className="mx-auto max-w-7xl">
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+            <p className="text-sm text-slate-500">Loading test items...</p>
+          </div>
+        </div>
+      </AppShell>
+    );
   }
 
   return (
@@ -1548,7 +1745,21 @@ export default function TestItemsPage() {
               />
             </div>
 
-            <div className="lg:col-span-2">
+            <div>
+              <label className="text-sm font-medium text-slate-700">
+                Unit 單位
+              </label>
+              <input
+                value={form.unit}
+                onChange={(event) =>
+                  setForm({ ...form, unit: event.target.value })
+                }
+                placeholder="item / CFU/g / mg/kg / g / %"
+                className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-900"
+              />
+            </div>
+
+            <div>
               <label className="text-sm font-medium text-slate-700">
                 Test Standard 檢測標準
               </label>
@@ -2213,6 +2424,9 @@ export default function TestItemsPage() {
                     <th className="border border-slate-200 px-4 py-3">
                       Standard
                     </th>
+                    <th className="border border-slate-200 px-4 py-3">
+                      Unit
+                    </th>
                     <th className="border border-slate-200 px-4 py-3 text-right">
                       Lab RMB
                     </th>
@@ -2287,6 +2501,10 @@ export default function TestItemsPage() {
                         {item.test_standard || "-"}
                       </td>
 
+                      <td className="border border-slate-200 px-4 py-3">
+                        {item.unit || "item"}
+                      </td>
+
                       <td className="border border-slate-200 px-4 py-3 text-right">
                         RMB {Number(item.lab_price_rmb || 0).toLocaleString()}
                       </td>
@@ -2327,7 +2545,7 @@ export default function TestItemsPage() {
                   {filteredItems.length === 0 && (
                     <tr>
                       <td
-                        colSpan={10}
+                        colSpan={11}
                         className="border border-slate-200 px-4 py-10 text-center text-slate-500"
                       >
                         No test items found.

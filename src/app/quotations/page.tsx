@@ -1,19 +1,37 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { createClient } from "@/lib/supabase/client";
 
 const EMIT_COMPANY_ID = "11111111-1111-1111-1111-111111111111";
 const EMIT_SIGNATURE_STAMP_SRC = "/images/emit-signature-stamp.png";
+// Snapshot fields in older quotations were populated with company contacts.
+// Treat those historic values as unset contact overrides so old quotations still
+// display the selected customer's information.
+const LEGACY_COMPANY_CONTACT = {
+  phone: new Set(["+853 2875 1742", "(853) 2875 1742"]),
+  fax: new Set(["+853 2852 0536", "(853) 2852 0536"]),
+  email: new Set(["am01@emit.com.mo"]),
+};
+function readCustomerContactOverride(
+  value: string | null | undefined,
+  field: "phone" | "fax" | "email"
+): string | null {
+  const trimmed = (value || "").trim();
+  if (!trimmed || LEGACY_COMPANY_CONTACT[field].has(trimmed)) return null;
+  return trimmed === "-" ? "" : trimmed;
+}
 
 const DEFAULT_NOTES = [
   "On-site sampling fee (per visit) is MOP 250;",
   "Report issue: approx. 7 ~10 working days upon sample collection;",
   "Contact Person : +853 66596580 / Mr. Leong",
 ].join("\n");
+
+type DiscountType = "none" | "percentage" | "fixed";
 
 type Customer = {
   id: string;
@@ -43,6 +61,7 @@ type TestItem = {
   lab_price_rmb: number;
   test_standard: string | null;
   turnaround_text: string | null;
+  unit: string | null;
 };
 
 type TestItemGroup = {
@@ -83,6 +102,7 @@ type QuotationSampleItem = {
   unitPriceMop: number;
   labPriceRmb: number;
   quantity: number;
+  unit: string | null;
   sourceGroupId?: string | null;
   sourceGroupCode?: string | null;
   sourceGroupName?: string | null;
@@ -107,8 +127,19 @@ type ExistingQuotation = {
   quotation_date: string | null;
   project_name: string | null;
   project_description: string | null;
+  subtotal: number | null;
+  discount_type: string | null;
+  discount_value: number | null;
+  discount_amount: number | null;
+  total_amount: number | null;
   notes: string | null;
   status: string | null;
+  to_customer_name?: string | null;
+  attention_to?: string | null;
+  from_company_name?: string | null;
+  from_tel?: string | null;
+  from_fax?: string | null;
+  from_email?: string | null;
 };
 
 type ExistingQuotationItem = {
@@ -130,6 +161,23 @@ type ExistingQuotationItem = {
   source_group_code?: string | null;
   source_group_name?: string | null;
   source_group_sort_order?: number | null;
+};
+
+type PreviewSnapshot = {
+  samples: QuotationSample[];
+  clientName: string | null;
+  attention: string | null;
+  sender: string;
+  tel: string | null;
+  fax: string | null;
+  email: string | null;
+  description: string | null;
+  quotationNo: string;
+  quotationDate: string;
+  projectName: string;
+  notes: string;
+  discountType: DiscountType;
+  discountValue: number;
 };
 
 type SampleTableRow = {
@@ -155,6 +203,13 @@ function normalizeSampleName(sampleName: string) {
 
 function normalizeText(value: string) {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function splitSampleDescriptionText(descriptionText: string | null | undefined) {
+  return String(descriptionText || "")
+    .split(/[、，,；;\n\r]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function getTodayInputValue() {
@@ -187,6 +242,43 @@ function formatQuotationDate(dateValue: string) {
   }
 
   return `${year} / ${month} / ${day}`;
+}
+
+function normalizeDiscountType(value: string | null | undefined): DiscountType {
+  const normalizedValue = String(value || "none").trim().toLowerCase();
+
+  if (
+    normalizedValue === "percentage" ||
+    normalizedValue === "percent" ||
+    normalizedValue === "%"
+  ) {
+    return "percentage";
+  }
+
+  if (
+    normalizedValue === "fixed" ||
+    normalizedValue === "amount" ||
+    normalizedValue === "fixed_amount"
+  ) {
+    return "fixed";
+  }
+
+  return "none";
+}
+
+function formatMoney(value: number) {
+  const numericValue = Number(value || 0);
+
+  if (Number.isInteger(numericValue)) {
+    return numericValue.toLocaleString("en-US", {
+      maximumFractionDigits: 0,
+    });
+  }
+
+  return numericValue.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function generateDraftQuotationNo() {
@@ -280,13 +372,15 @@ function normalizeLoadedGroupItem(
   };
 }
 
-export default function QuotationsPage() {
+function QuotationsPageContent() {
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
   const searchParams = useSearchParams();
 
   const editQuotationId = searchParams.get("editQuotationId") || "";
   const editReload = searchParams.get("editReload") || "";
+
+  const [hasMounted, setHasMounted] = useState(false);
 
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [testItems, setTestItems] = useState<TestItem[]>([]);
@@ -302,6 +396,8 @@ export default function QuotationsPage() {
   const [projectName, setProjectName] = useState("食品檢測");
   const [quotationDate, setQuotationDate] = useState(getTodayInputValue());
   const [quotationNotes, setQuotationNotes] = useState(DEFAULT_NOTES);
+  const [discountType, setDiscountType] = useState<DiscountType>("none");
+  const [discountValue, setDiscountValue] = useState(0);
 
   const [signatoryName, setSignatoryName] = useState("");
   const [signatoryDate, setSignatoryDate] = useState(getTodayInputValue());
@@ -320,6 +416,17 @@ export default function QuotationsPage() {
 
   const [editingQuotationId, setEditingQuotationId] = useState("");
   const [editingQuotationNo, setEditingQuotationNo] = useState("");
+  // Quotation-specific overrides: these never update the customers table.
+  // null means inherit from the selected customer; "" means intentionally blank.
+  const [clientNameOverride, setClientNameOverride] = useState<string | null>(null);
+  const [attentionOverride, setAttentionOverride] = useState<string | null>(null);
+  const [senderName, setSenderName] = useState("EMIT");
+  const [telOverride, setTelOverride] = useState<string | null>(null);
+  const [faxOverride, setFaxOverride] = useState<string | null>(null);
+  const [emailOverride, setEmailOverride] = useState<string | null>(null);
+  const [projectDescriptionOverride, setProjectDescriptionOverride] = useState<string | null>(null);
+  const [isPreviewEditing, setIsPreviewEditing] = useState(false);
+  const previewSnapshotRef = useRef<PreviewSnapshot | null>(null);
   const [loadedEditQuotationId, setLoadedEditQuotationId] = useState("");
 
   const [errorMessage, setErrorMessage] = useState("");
@@ -330,6 +437,14 @@ export default function QuotationsPage() {
       customers.find((customer) => customer.id === selectedCustomerId) || null
     );
   }, [customers, selectedCustomerId]);
+
+  const previewCustomerName = clientNameOverride !== null
+    ? clientNameOverride : (selectedCustomer?.customer_name || "");
+  const previewAttention = attentionOverride !== null
+    ? attentionOverride : (selectedCustomer?.contact_person || "");
+  const previewTel = telOverride !== null ? telOverride : (selectedCustomer?.phone || "");
+  const previewFax = faxOverride !== null ? faxOverride : (selectedCustomer?.fax || "");
+  const previewEmail = emailOverride !== null ? emailOverride : (selectedCustomer?.email || "");
 
   const activeCompanyId = useMemo(() => {
     return selectedCustomer?.company_id || EMIT_COMPANY_ID;
@@ -390,6 +505,9 @@ export default function QuotationsPage() {
     return sampleNames.join("、");
   }, [samples]);
 
+  const previewProjectDescription = projectDescriptionOverride !== null
+    ? projectDescriptionOverride : sampleDescriptionText;
+
   const totalAmount = useMemo(() => {
     return samples.reduce((sampleSum, sample) => {
       const itemSum = sample.items.reduce(
@@ -400,6 +518,47 @@ export default function QuotationsPage() {
       return sampleSum + itemSum;
     }, 0);
   }, [samples]);
+
+  const safeDiscountValue = useMemo(() => {
+    const numericValue = Number(discountValue || 0);
+
+    if (Number.isNaN(numericValue) || numericValue < 0) {
+      return 0;
+    }
+
+    if (discountType === "percentage") {
+      return Math.min(numericValue, 100);
+    }
+
+    return numericValue;
+  }, [discountType, discountValue]);
+
+  const discountAmount = useMemo(() => {
+    if (discountType === "percentage") {
+      return Math.min(
+        totalAmount,
+        totalAmount * (safeDiscountValue / 100)
+      );
+    }
+
+    if (discountType === "fixed") {
+      return Math.min(totalAmount, safeDiscountValue);
+    }
+
+    return 0;
+  }, [discountType, safeDiscountValue, totalAmount]);
+
+  const finalTotalAmount = useMemo(() => {
+    return Math.max(0, totalAmount - discountAmount);
+  }, [discountAmount, totalAmount]);
+
+  const discountPreviewLabel = useMemo(() => {
+    if (discountType === "percentage" && safeDiscountValue > 0) {
+      return `Discount 折扣 (${formatMoney(safeDiscountValue)}%)：`;
+    }
+
+    return "Discount 折扣：";
+  }, [discountType, safeDiscountValue]);
 
   const totalLabCostRmb = useMemo(() => {
     return samples.reduce((sampleSum, sample) => {
@@ -515,9 +674,17 @@ export default function QuotationsPage() {
   const isEditMode = Boolean(editingQuotationId);
 
   useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hasMounted) {
+      return;
+    }
+
     loadInitialData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [hasMounted]);
 
   useEffect(() => {
     if (!initialDataLoaded || !editQuotationId) {
@@ -560,7 +727,7 @@ export default function QuotationsPage() {
           supabase
             .from("test_items")
             .select(
-              "id,category_id,item_code,item_name_zh,item_name_en,major_category,testing_object,customer_price_mop,lab_price_rmb,test_standard,turnaround_text"
+              "id,category_id,item_code,item_name_zh,item_name_en,major_category,testing_object,customer_price_mop,lab_price_rmb,test_standard,turnaround_text,unit"
             )
             .eq("is_active", true)
             .eq("show_in_quotation", true)
@@ -831,6 +998,7 @@ export default function QuotationsPage() {
           unitPriceMop: Number(item.customer_unit_price_mop_snapshot || 0),
           labPriceRmb: Number(item.lab_price_rmb_snapshot || 0),
           quantity: Number(item.quantity || 1),
+          unit: item.unit || testItemMap.get(item.test_item_id || "")?.unit || "item",
           sourceGroupId: item.source_group_id || null,
           sourceGroupCode: item.source_group_code || null,
           sourceGroupName: item.source_group_name || null,
@@ -855,14 +1023,58 @@ export default function QuotationsPage() {
         .sort(([sampleNoA], [sampleNoB]) => sampleNoA - sampleNoB)
         .map(([, sample]) => sample);
 
+      const savedSampleNames = splitSampleDescriptionText(
+        loadedQuotation.project_description || ""
+      );
+
+      const existingSampleNameKeys = new Set(
+        loadedSamples.map((sample) => normalizeSampleName(sample.sampleName))
+      );
+
+      savedSampleNames.forEach((sampleName) => {
+        const normalizedSampleName = normalizeSampleName(sampleName);
+
+        if (!normalizedSampleName || existingSampleNameKeys.has(normalizedSampleName)) {
+          return;
+        }
+
+        loadedSamples.push({
+          id: `sample-description-${createLocalId()}`,
+          sampleName,
+          selectedTestItemId: testItems[0]?.id || "",
+          testItemSearchText: "",
+          selectedGroupId: testItemGroups[0]?.id || "",
+          groupSearchText: "",
+          items: [],
+        });
+
+        existingSampleNameKeys.add(normalizedSampleName);
+      });
+
       setEditingQuotationId(loadedQuotation.id);
       setEditingQuotationNo(loadedQuotation.quotation_no || "");
+      setClientNameOverride(loadedQuotation.to_customer_name ?? null);
+      setAttentionOverride(loadedQuotation.attention_to ?? null);
+      setSenderName(loadedQuotation.from_company_name || "EMIT");
+      setTelOverride(readCustomerContactOverride(loadedQuotation.from_tel, "phone"));
+      setFaxOverride(readCustomerContactOverride(loadedQuotation.from_fax, "fax"));
+      setEmailOverride(readCustomerContactOverride(loadedQuotation.from_email, "email"));
+      setProjectDescriptionOverride(
+        loadedQuotation.project_description &&
+        loadedQuotation.project_description !== loadedSamples.map(s => s.sampleName).join("、")
+          ? loadedQuotation.project_description
+          : null
+      );
+      previewSnapshotRef.current = null;
+      setIsPreviewEditing(false);
       setLoadedEditQuotationId(loadedQuotation.id);
 
       setSelectedCustomerId(loadedQuotation.customer_id || "");
       setProjectName(loadedQuotation.project_name || "食品檢測");
       setQuotationDate(loadedQuotation.quotation_date || getTodayInputValue());
       setQuotationNotes(loadedQuotation.notes || DEFAULT_NOTES);
+      setDiscountType(normalizeDiscountType(loadedQuotation.discount_type));
+      setDiscountValue(Number(loadedQuotation.discount_value || 0));
       setSamples(loadedSamples);
       setNewSampleName("");
 
@@ -1392,6 +1604,7 @@ export default function QuotationsPage() {
       unitPriceMop: Number(selectedTestItem.customer_price_mop),
       labPriceRmb: Number(selectedTestItem.lab_price_rmb),
       quantity: 1,
+      unit: selectedTestItem.unit || "item",
       sourceGroupId: null,
       sourceGroupCode: null,
       sourceGroupName: null,
@@ -1478,6 +1691,7 @@ export default function QuotationsPage() {
           unitPriceMop: itemPrice,
           labPriceRmb: labPrice,
           quantity: 1,
+          unit: testItem.unit || "item",
           sourceGroupId: selectedGroup.id,
           sourceGroupCode: selectedGroup.group_code,
           sourceGroupName: selectedGroup.group_name_zh,
@@ -1547,6 +1761,102 @@ export default function QuotationsPage() {
           : sample
       )
     );
+  }
+
+  function updateSampleNameInPreview(sampleId: string, value: string) {
+    setSamples(current => current.map(sample => sample.id === sampleId
+      ? { ...sample, sampleName: value } : sample));
+  }
+
+  function updateSampleItemInPreview(
+    sampleId: string, itemId: string,
+    patch: Partial<Pick<QuotationSampleItem, "testItemName" | "testCategoryName">>
+  ) {
+    setSamples(current => current.map(sample => sample.id === sampleId
+      ? { ...sample, items: sample.items.map(item => item.id === itemId
+        ? { ...item, ...patch } : item) } : sample));
+  }
+
+  function updateDescriptionGroupInPreview(
+    sampleId: string, itemId: string, newName: string
+  ) {
+    setSamples(current => current.map(sample => {
+      if (sample.id !== sampleId) return sample;
+      const anchor = sample.items.find(item => item.id === itemId);
+      if (!anchor) return sample;
+      return { ...sample, items: sample.items.map(item =>
+        item.testCategoryName === anchor.testCategoryName &&
+        item.sourceGroupId === anchor.sourceGroupId
+          ? { ...item, testCategoryName: newName,
+              ...(item.sourceGroupId ? { sourceGroupName: newName } : {}) } : item
+      ) };
+    }));
+  }
+
+  // A grouped price is shown as one editable figure. Preserve individual
+  // test-item price proportions (and existing zero-price package children).
+  function updatePriceGroupInPreview(
+    sampleId: string, groupKey: string, newPrice: number
+  ) {
+    if (!Number.isFinite(newPrice) || newPrice < 0) return;
+    const target = Math.round(newPrice * 100);
+    setSamples(current => current.map(sample => {
+      if (sample.id !== sampleId) return sample;
+      const group = sample.items.filter(item =>
+        (item.sourceGroupId ? `${sample.id}-group-${item.sourceGroupId}`
+          : `${sample.id}-single-${item.id}`) === groupKey);
+      if (group.length === 0) return sample;
+      const originalTotalCents = group.reduce((total, item) =>
+        total + Math.round(item.unitPriceMop * 100), 0);
+      let allocated = 0;
+      const prices = new Map<string, number>();
+      group.forEach((item, index) => {
+        const remaining = Math.max(0, target - allocated);
+        const proportional = originalTotalCents > 0
+          ? Math.round(target * Math.round(item.unitPriceMop * 100) / originalTotalCents)
+          : index === 0 ? target : 0;
+        const cents = index === group.length - 1
+          ? remaining : Math.max(0, Math.min(remaining, proportional));
+        prices.set(item.id, cents / 100);
+        allocated += cents;
+      });
+      return { ...sample, items: sample.items.map(item =>
+        prices.has(item.id) ? { ...item, unitPriceMop: prices.get(item.id)! } : item) };
+    }));
+  }
+
+  function beginPreviewEdit() {
+    previewSnapshotRef.current = {
+      samples: samples.map(s => ({ ...s, items: s.items.map(i => ({ ...i })) })),
+      clientName: clientNameOverride, attention: attentionOverride,
+      sender: senderName, tel: telOverride, fax: faxOverride, email: emailOverride,
+      description: projectDescriptionOverride, quotationNo: editingQuotationNo,
+      quotationDate, projectName, notes: quotationNotes,
+      discountType, discountValue,
+    };
+    setIsPreviewEditing(true);
+  }
+
+  function cancelPreviewEdit() {
+    const old = previewSnapshotRef.current;
+    if (old) {
+      setSamples(old.samples);
+      setClientNameOverride(old.clientName);
+      setAttentionOverride(old.attention);
+      setSenderName(old.sender);
+      setTelOverride(old.tel);
+      setFaxOverride(old.fax);
+      setEmailOverride(old.email);
+      setProjectDescriptionOverride(old.description);
+      setEditingQuotationNo(old.quotationNo);
+      setQuotationDate(old.quotationDate);
+      setProjectName(old.projectName);
+      setQuotationNotes(old.notes);
+      setDiscountType(old.discountType);
+      setDiscountValue(old.discountValue);
+    }
+    previewSnapshotRef.current = null;
+    setIsPreviewEditing(false);
   }
 
   function handleUpdateItemQuantity(
@@ -1637,7 +1947,7 @@ export default function QuotationsPage() {
           item_no: sampleIndex + 1,
           description: item.testItemName,
           quantity: item.quantity,
-          unit: "item",
+          unit: item.unit || "item",
           lab_price_rmb_snapshot: item.labPriceRmb,
           customer_unit_price_mop_snapshot: item.unitPriceMop,
           customer_total_price_mop_snapshot:
@@ -1665,6 +1975,22 @@ export default function QuotationsPage() {
       return;
     }
 
+    if (editingQuotationId && !editingQuotationNo.trim()) {
+      setErrorMessage("已儲存的報價單編號不能留空。");
+      return;
+    }
+    if (!previewCustomerName.trim()) {
+      setErrorMessage("請輸入報價單上的客戶名稱（TO）。");
+      return;
+    }
+    if (samples.some(s => s.items.length > 0 && !s.sampleName.trim())) {
+      setErrorMessage("檢測食品描述不能留空。");
+      return;
+    }
+    if (samplesWithItems.some(s => s.items.some(i => !i.testItemName.trim()))) {
+      setErrorMessage("檢測項目名稱不能留空。");
+      return;
+    }
     if (samplesWithItems.length === 0) {
       setErrorMessage("請至少新增一個樣本，並加入至少一個檢測項目。");
       return;
@@ -1691,17 +2017,20 @@ export default function QuotationsPage() {
             quotation_date:
               quotationDate || new Date().toISOString().slice(0, 10),
             no_of_pages: 3,
-            to_customer_name: selectedCustomer.customer_name,
-            attention_to: selectedCustomer.contact_person,
-            from_company_name: "EMIT",
-            from_tel: "+853 2875 1742",
-            from_fax: "+853 2852 0536",
-            from_email: "am01@emit.com.mo",
+            quotation_no: editingQuotationNo.trim() || undefined,
+            to_customer_name: previewCustomerName.trim(),
+            attention_to: previewAttention.trim() || null,
+            from_company_name: senderName.trim() || "EMIT",
+            from_tel: previewTel.trim() || "-",
+            from_fax: previewFax.trim() || "-",
+            from_email: previewEmail.trim() || "-",
             project_name: projectName,
-            project_description: sampleDescriptionText,
+            project_description: previewProjectDescription,
             subtotal: totalAmount,
-            discount_amount: 0,
-            total_amount: totalAmount,
+            discount_type: discountType,
+            discount_value: safeDiscountValue,
+            discount_amount: discountAmount,
+            total_amount: finalTotalAmount,
             currency: "MOP",
             notes: quotationNotes || DEFAULT_NOTES,
             status: "draft",
@@ -1743,7 +2072,7 @@ export default function QuotationsPage() {
         return;
       }
 
-      const quotationNo = generateDraftQuotationNo();
+      const quotationNo = editingQuotationNo.trim() || generateDraftQuotationNo();
 
       const { data: quotationData, error: quotationError } = await supabase
         .from("quotations")
@@ -1751,19 +2080,21 @@ export default function QuotationsPage() {
           company_id: activeCompanyId,
           customer_id: selectedCustomer.id,
           quotation_no: quotationNo,
-          quotation_date: new Date().toISOString().slice(0, 10),
+          quotation_date: quotationDate || getTodayInputValue(),
           no_of_pages: 3,
-          to_customer_name: selectedCustomer.customer_name,
-          attention_to: selectedCustomer.contact_person,
-          from_company_name: "EMIT",
-          from_tel: "+853 2875 1742",
-          from_fax: "+853 2852 0536",
-          from_email: "am01@emit.com.mo",
+          to_customer_name: previewCustomerName.trim(),
+          attention_to: previewAttention.trim() || null,
+          from_company_name: senderName.trim() || "EMIT",
+          from_tel: previewTel.trim() || "-",
+          from_fax: previewFax.trim() || "-",
+          from_email: previewEmail.trim() || "-",
           project_name: projectName,
-          project_description: sampleDescriptionText,
+          project_description: previewProjectDescription,
           subtotal: totalAmount,
-          discount_amount: 0,
-          total_amount: totalAmount,
+          discount_type: discountType,
+          discount_value: safeDiscountValue,
+          discount_amount: discountAmount,
+          total_amount: finalTotalAmount,
           currency: "MOP",
           notes: quotationNotes || DEFAULT_NOTES,
           status: "draft",
@@ -1797,6 +2128,18 @@ export default function QuotationsPage() {
     } finally {
       setSaving(false);
     }
+  }
+
+  if (!hasMounted) {
+    return (
+      <AppShell>
+        <div className="mx-auto max-w-7xl">
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+            <p className="text-sm text-slate-500">Loading quotation form...</p>
+          </div>
+        </div>
+      </AppShell>
+    );
   }
 
   return (
@@ -1903,7 +2246,14 @@ export default function QuotationsPage() {
               </label>
               <select
                 value={selectedCustomerId}
-                onChange={(event) => setSelectedCustomerId(event.target.value)}
+                onChange={(event) => {
+                    setSelectedCustomerId(event.target.value);
+                    setClientNameOverride(null);
+                    setAttentionOverride(null);
+                    setTelOverride(null);
+                    setFaxOverride(null);
+                    setEmailOverride(null);
+                  }}
                 disabled={loading || loadingEditQuotation}
                 className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-900 disabled:bg-slate-100 disabled:text-slate-400"
               >
@@ -1970,6 +2320,22 @@ export default function QuotationsPage() {
                 />
               </div>
             )}
+          </div>
+
+          <div className="mt-6">
+            <label className="text-sm font-medium text-slate-700">
+              Notes 備注
+            </label>
+            <textarea
+              value={quotationNotes}
+              onChange={(event) => setQuotationNotes(event.target.value)}
+              rows={4}
+              placeholder="每行一條備注，會顯示在報價單下方 Notes 區塊"
+              className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-900"
+            />
+            <p className="mt-2 text-xs text-slate-500">
+              每按一次 Enter 換行，即為一條新備注。留空則使用預設備注。
+            </p>
           </div>
 
           <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-5">
@@ -2411,83 +2777,238 @@ export default function QuotationsPage() {
             )}
           </div>
 
+          <div className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-5">
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">
+                  Discount 折扣設定
+                </h3>
+                <p className="mt-1 text-sm text-slate-600">
+                  可選擇百分比折扣或固定金額折扣，系統會自動計算應付總額。
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-blue-200 bg-white px-4 py-3 text-sm text-slate-700">
+                Subtotal 小計：MOP {formatMoney(totalAmount)}
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              <div>
+                <label className="text-sm font-medium text-slate-700">
+                  Discount Type 折扣類型
+                </label>
+                <select
+                  value={discountType}
+                  onChange={(event) => {
+                    const nextDiscountType = normalizeDiscountType(
+                      event.target.value
+                    );
+
+                    setDiscountType(nextDiscountType);
+
+                    if (nextDiscountType === "none") {
+                      setDiscountValue(0);
+                    }
+                  }}
+                  className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-900"
+                >
+                  <option value="none">No Discount／不設折扣</option>
+                  <option value="percentage">
+                    Percentage／百分比折扣
+                  </option>
+                  <option value="fixed">Fixed Amount／固定金額折扣</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-sm font-medium text-slate-700">
+                  {discountType === "percentage"
+                    ? "Discount Percentage 折扣百分比 (%)"
+                    : discountType === "fixed"
+                      ? "Discount Amount 折扣金額 (MOP)"
+                      : "Discount Value 折扣數值"}
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max={discountType === "percentage" ? 100 : undefined}
+                  step="0.01"
+                  value={discountValue}
+                  onChange={(event) => {
+                    const nextValue = Number(event.target.value);
+
+                    if (Number.isNaN(nextValue) || nextValue < 0) {
+                      setDiscountValue(0);
+                      return;
+                    }
+
+                    if (discountType === "percentage") {
+                      setDiscountValue(Math.min(nextValue, 100));
+                      return;
+                    }
+
+                    setDiscountValue(nextValue);
+                  }}
+                  disabled={discountType === "none"}
+                  placeholder={
+                    discountType === "percentage"
+                      ? "例如：10 代表 10%"
+                      : "例如：500 代表 MOP 500"
+                  }
+                  className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-900 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-3 md:grid-cols-3">
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Subtotal 小計
+                </p>
+                <p className="mt-2 text-lg font-bold text-slate-900">
+                  MOP {formatMoney(totalAmount)}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Discount 折扣
+                </p>
+                <p className="mt-2 text-lg font-bold text-red-600">
+                  - MOP {formatMoney(discountAmount)}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-900 bg-slate-900 p-4 text-white">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                  Total 應付總額
+                </p>
+                <p className="mt-2 text-lg font-bold">
+                  MOP {formatMoney(finalTotalAmount)}
+                </p>
+              </div>
+            </div>
+          </div>
+
           <div className="mt-6 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">
-            Internal cost reference: RMB {totalLabCostRmb.toLocaleString()}.
-            Customer quotation total: MOP {totalAmount.toLocaleString()}.
+            Internal cost reference: RMB {formatMoney(totalLabCostRmb)}.
+            Customer quotation subtotal: MOP {formatMoney(totalAmount)}.
+            Discount: MOP {formatMoney(discountAmount)}.
+            Customer quotation total: MOP {formatMoney(finalTotalAmount)}.
           </div>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
-          <div className="border-b border-slate-200 pb-6">
-            <h2 className="text-center text-3xl font-bold tracking-wide text-slate-900">
-              QUOTATION
-            </h2>
+          <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-6">
+            <div className="w-36" />
+            <h2 className="text-center text-3xl font-bold tracking-wide text-slate-900">QUOTATION</h2>
+            <div className="flex flex-wrap justify-end gap-2">
+              {isPreviewEditing ? (
+                <>
+                  <button type="button" onClick={cancelPreviewEdit}
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold hover:bg-slate-100">
+                    Cancel
+                  </button>
+                  <button type="button" onClick={handleSaveDraft}
+                    disabled={saving || loading || loadingEditQuotation}
+                    className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-60">
+                    {saving ? "Saving..." : isEditMode ? "Save Changes" : "Save Quotation"}
+                  </button>
+                </>
+              ) : (
+                <button type="button" onClick={beginPreviewEdit}
+                  disabled={loading || loadingEditQuotation}
+                  className="rounded-lg border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-60">
+                  Edit Quotation
+                </button>
+              )}
+            </div>
           </div>
+          {isPreviewEditing && (
+            <p className="mt-3 text-sm text-blue-700">
+              直接修改以下欄位；只有按 Save Changes / Save Quotation 才會儲存至 Supabase。
+              客戶及檢測項目主資料不會被修改。
+            </p>
+          )}
 
           <div className="mt-8 grid grid-cols-2 gap-8">
             <div className="space-y-4">
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">TO:</p>
-                <p className="text-slate-900">
-                  {selectedCustomer?.customer_name || "-"}
-                </p>
+                {isPreviewEditing ?
+                  <input aria-label="Quotation customer name" value={previewCustomerName}
+                    onChange={e => setClientNameOverride(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{previewCustomerName || "-"}</p>}
               </div>
-
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">ATTN:</p>
-                <p className="text-slate-900">
-                  {selectedCustomer?.contact_person || "-"}
-                </p>
+                {isPreviewEditing ?
+                  <input aria-label="Quotation contact person" value={previewAttention}
+                    onChange={e => setAttentionOverride(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{previewAttention || "-"}</p>}
               </div>
-
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">DATE:</p>
-                <p className="text-slate-900">
-                  {isEditMode
-                    ? formatQuotationDate(quotationDate)
-                    : getTodayText()}
-                </p>
+                {isPreviewEditing ?
+                  <input aria-label="Quotation date" type="date" value={quotationDate}
+                    onChange={e => setQuotationDate(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{formatQuotationDate(quotationDate)}</p>}
               </div>
-
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">NO.:</p>
-                <p className="text-slate-900">
-                  {isEditMode
-                    ? editingQuotationNo || "-"
-                    : "Auto after Save Draft"}
-                </p>
+                {isPreviewEditing ?
+                  <input aria-label="Quotation number" value={editingQuotationNo}
+                    onChange={e => setEditingQuotationNo(e.target.value)} placeholder="Leave blank for automatic number"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{editingQuotationNo || "Auto after Save Draft"}</p>}
               </div>
             </div>
 
             <div className="space-y-4">
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">FROM:</p>
-                <p className="text-slate-900">EMIT</p>
+                {isPreviewEditing ?
+                  <input aria-label="Sender" value={senderName}
+                    onChange={e => setSenderName(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{senderName || "EMIT"}</p>}
               </div>
-
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">TEL:</p>
-                <p className="text-slate-900">+853 2875 1742</p>
+                {isPreviewEditing ?
+                  <input aria-label="Customer phone on quotation" value={previewTel}
+                    onChange={e => setTelOverride(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{previewTel || "-"}</p>}
               </div>
-
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">FAX:</p>
-                <p className="text-slate-900">+853 2852 0536</p>
+                {isPreviewEditing ?
+                  <input aria-label="Customer fax on quotation" value={previewFax}
+                    onChange={e => setFaxOverride(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{previewFax || "-"}</p>}
               </div>
-
-              <div className="grid grid-cols-[100px_1fr] gap-4">
+              <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                 <p className="font-semibold text-slate-700">EMAIL:</p>
-                <p className="text-slate-900">am01@emit.com.mo</p>
+                {isPreviewEditing ?
+                  <input aria-label="Customer email on quotation" type="email" value={previewEmail}
+                    onChange={e => setEmailOverride(e.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+                  <p className="text-slate-900">{previewEmail || "-"}</p>}
               </div>
             </div>
           </div>
 
-          <div className="mt-8 grid grid-cols-[160px_1fr] gap-4 border-t border-slate-200 pt-6">
+          <div className="mt-8 grid grid-cols-[160px_1fr] items-center gap-4 border-t border-slate-200 pt-6">
             <p className="font-semibold text-slate-700">Project 項目</p>
-            <p className="text-slate-900">{projectName}</p>
-
+            {isPreviewEditing ?
+              <input aria-label="Quotation project" value={projectName} onChange={e => setProjectName(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+              <p className="text-slate-900">{projectName}</p>}
             <p className="font-semibold text-slate-700">檢測食品描述</p>
-            <p className="text-slate-900">{sampleDescriptionText}</p>
+            {isPreviewEditing ?
+              <textarea aria-label="Quotation project description" rows={2} value={previewProjectDescription}
+                onChange={e => setProjectDescriptionOverride(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /> :
+              <p className="text-slate-900">{previewProjectDescription}</p>}
           </div>
 
           <div className="mt-8 overflow-hidden rounded-xl border border-slate-300">
@@ -2545,7 +3066,11 @@ export default function QuotationsPage() {
                           rowSpan={row.sampleItemCount}
                           className="border border-slate-300 px-4 py-3 text-center align-middle font-medium text-slate-900"
                         >
-                          {row.sampleName}
+                          {isPreviewEditing ? (
+                            <input aria-label={`Sample ${row.sampleIndex + 1} name`} value={row.sampleName}
+                              onChange={e => updateSampleNameInPreview(row.sampleId, e.target.value)}
+                              className="w-full min-w-24 rounded border border-slate-300 px-1 py-1 text-center text-sm" />
+                          ) : row.sampleName}
                         </td>
                       </>
                     )}
@@ -2556,7 +3081,11 @@ export default function QuotationsPage() {
                         className="border border-slate-300 px-4 py-3 text-center align-middle text-slate-900"
                       >
                         <div className="font-semibold">
-                          {row.item.testCategoryName}
+                          {isPreviewEditing ? (
+                            <input aria-label={`Description group ${row.item.id}`} value={row.item.testCategoryName}
+                              onChange={e => updateDescriptionGroupInPreview(row.sampleId, row.item.id, e.target.value)}
+                              className="w-full min-w-24 rounded border border-slate-300 px-1 py-1 text-center text-sm" />
+                          ) : row.item.testCategoryName}
                         </div>
                         {row.item.sourceGroupCode && (
                           <div className="mt-1 text-[11px] text-emerald-700">
@@ -2567,7 +3096,11 @@ export default function QuotationsPage() {
                     )}
 
                     <td className="border border-slate-300 px-4 py-3 text-center align-middle text-slate-900">
-                      {row.item.testItemName}
+                      {isPreviewEditing ? (
+                        <input aria-label={`Test item ${row.item.id}`} value={row.item.testItemName}
+                          onChange={e => updateSampleItemInPreview(row.sampleId, row.item.id, { testItemName: e.target.value })}
+                          className="w-full min-w-28 rounded border border-slate-300 px-1 py-1 text-center text-sm" />
+                      ) : row.item.testItemName}
                     </td>
 
                     {row.isFirstPriceGroupRow && (
@@ -2576,7 +3109,15 @@ export default function QuotationsPage() {
                           rowSpan={row.priceGroupRowSpan}
                           className="border border-slate-300 px-4 py-3 text-center align-middle text-slate-900"
                         >
-                          MOP {row.priceGroupUnitPrice.toLocaleString()}
+                          {isPreviewEditing ? (
+                            <div className="flex items-center gap-1">
+                              <span>MOP</span>
+                              <input aria-label={`Price of ${row.priceGroupKey}`} type="number" min="0" step="0.01"
+                                value={row.priceGroupUnitPrice}
+                                onChange={e => updatePriceGroupInPreview(row.sampleId, row.priceGroupKey, Number(e.target.value))}
+                                className="w-24 rounded border border-slate-300 px-1 py-1 text-center text-sm" />
+                            </div>
+                          ) : <>MOP {row.priceGroupUnitPrice.toLocaleString()}</>}
                         </td>
 
                         <td
@@ -2623,10 +3164,59 @@ export default function QuotationsPage() {
                     colSpan={6}
                     className="border border-slate-300 px-4 py-3 text-center align-middle font-bold text-slate-900"
                   >
-                    Total 總價(MOP)：
+                    Subtotal 小計(MOP)：
                   </td>
                   <td className="border border-slate-300 px-4 py-3 text-center align-middle font-bold text-slate-900">
-                    {totalAmount.toLocaleString()}
+                    {formatMoney(totalAmount)}
+                  </td>
+                </tr>
+
+                <tr className="bg-slate-50">
+                  <td
+                    colSpan={6}
+                    className="border border-slate-300 px-4 py-3 text-center align-middle font-bold text-slate-900"
+                  >
+                    {isPreviewEditing ? (
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        <span>Discount 折扣：</span>
+                        <select aria-label="Preview discount type" value={discountType}
+                          onChange={e => {
+                            const type = normalizeDiscountType(e.target.value);
+                            setDiscountType(type);
+                            if (type === "none") setDiscountValue(0);
+                          }} className="rounded border border-slate-300 bg-white px-2 py-1 text-sm">
+                          <option value="none">None</option>
+                          <option value="percentage">%</option>
+                          <option value="fixed">MOP</option>
+                        </select>
+                        <input aria-label="Preview discount value" type="number" min="0"
+                          max={discountType === "percentage" ? 100 : undefined}
+                          step="0.01" disabled={discountType === "none"}
+                          value={discountValue}
+                          onChange={e => {
+                            const value = Number(e.target.value);
+                            if (Number.isFinite(value) && value >= 0)
+                              setDiscountValue(discountType === "percentage" ? Math.min(100, value) : value);
+                          }} className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm" />
+                      </div>
+                    ) : discountPreviewLabel}
+                  </td>
+                  <td className="border border-slate-300 px-4 py-3 text-center align-middle font-bold text-red-600">
+                    {discountAmount > 0
+                      ? `-${formatMoney(discountAmount)}`
+                      : "0"}
+                  </td>
+                </tr>
+
+                <tr className="bg-slate-100">
+                  <td
+                    colSpan={6}
+                    className="border border-slate-300 px-4 py-3 text-center align-middle font-bold text-slate-900"
+                  >
+                    Total 應付總額(MOP)：
+                  </td>
+                  <td className="border border-slate-300 px-4 py-3 text-center align-middle font-bold text-slate-900">
+                    {formatMoney(finalTotalAmount)}
                   </td>
                 </tr>
               </tbody>
@@ -2635,19 +3225,23 @@ export default function QuotationsPage() {
 
           <div className="mt-8 rounded-xl border border-slate-200 bg-slate-50 p-5">
             <h3 className="font-semibold text-slate-900">Notes:</h3>
-            <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-slate-700">
+            {isPreviewEditing ? (
+              <textarea aria-label="Quotation notes" value={quotationNotes}
+                onChange={e => setQuotationNotes(e.target.value)} rows={4}
+                className="mt-3 w-full rounded-lg border border-slate-300 bg-white p-3 text-sm" />
+            ) : <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-slate-700">
               {(quotationNotes || DEFAULT_NOTES)
                 .split("\n")
                 .filter(Boolean)
                 .map((note, index) => (
                   <li key={`${note}-${index}`}>{note}</li>
                 ))}
-            </ol>
+            </ol>}
           </div>
 
           <div className="mt-8 space-y-5 text-sm leading-7 text-slate-700">
             <p>
-              Dear {selectedCustomer?.contact_person || "Client"}, this
+              Dear {previewAttention || "Client"}, this
               quotation has been developed based on information provided.
             </p>
 
@@ -2702,5 +3296,23 @@ export default function QuotationsPage() {
         </div>
       </div>
     </AppShell>
+  );
+}
+
+export default function QuotationsPage() {
+  return (
+    <Suspense
+      fallback={
+        <AppShell>
+          <div className="mx-auto max-w-7xl">
+            <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+              <p className="text-sm text-slate-500">Loading quotation form...</p>
+            </div>
+          </div>
+        </AppShell>
+      }
+    >
+      <QuotationsPageContent />
+    </Suspense>
   );
 }
