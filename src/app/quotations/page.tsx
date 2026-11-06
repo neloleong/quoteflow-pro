@@ -1763,7 +1763,7 @@ function QuotationsPageContent() {
     );
   }
 
-  function updateSampleNameInPreview(sampleId: string, value: string) {
+  function handleChangeSampleName(sampleId: string, value: string) {
     setSamples(current => current.map(sample => sample.id === sampleId
       ? { ...sample, sampleName: value } : sample));
   }
@@ -2428,13 +2428,25 @@ function QuotationsPageContent() {
                   className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
                 >
                   <div className="flex items-center justify-between gap-4">
-                    <div>
+                    <div className="min-w-0 flex-1">
                       <p className="text-sm text-slate-500">
                         Item {sampleIndex + 1}
                       </p>
-                      <h3 className="text-lg font-bold text-slate-900">
-                        {sample.sampleName}
-                      </h3>
+                      <label
+                        htmlFor={`sample-name-${sample.id}`}
+                        className="sr-only"
+                      >
+                        檢測食品描述 / Sample Name
+                      </label>
+                      <input
+                        id={`sample-name-${sample.id}`}
+                        value={sample.sampleName}
+                        onChange={(event) =>
+                          handleChangeSampleName(sample.id, event.target.value)
+                        }
+                        placeholder="輸入檢測食品描述"
+                        className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-lg font-bold text-slate-900 outline-none focus:border-slate-900"
+                      />
                     </div>
 
                     <button
@@ -3068,7 +3080,7 @@ function QuotationsPageContent() {
                         >
                           {isPreviewEditing ? (
                             <input aria-label={`Sample ${row.sampleIndex + 1} name`} value={row.sampleName}
-                              onChange={e => updateSampleNameInPreview(row.sampleId, e.target.value)}
+                              onChange={e => handleChangeSampleName(row.sampleId, e.target.value)}
                               className="w-full min-w-24 rounded border border-slate-300 px-1 py-1 text-center text-sm" />
                           ) : row.sampleName}
                         </td>
